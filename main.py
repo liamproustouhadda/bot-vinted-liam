@@ -3,21 +3,28 @@ import time
 import requests
 import logging
 
-# Configuration des logs pour voir clairement l'exécution dans GitHub Actions
+# Configuration des logs pour voir l'exécution dans GitHub Actions
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# 📌 Récupération intelligente de l'URL du Webhook (avec vérification de plusieurs noms possibles)
+# Récupération de l'URL du Webhook
 WEBHOOK_URL = (
     os.environ.get("DISCORD_WEBHOOK_URL") 
     or os.environ.get("WEBHOOK_URL") 
     or os.environ.get("DISCORD_BOT_TOKEN")
 )
 
-# 🎯 MARQUES À SURVEILLER
+# 🎯 NOUVELLE LISTE DE MARQUES À SURVEILLER
 BRANDS = [
-    "ralph lauren", "nike", "adidas", 
-    "gucci", "louis vuitton", "prada", 
-    "balenciaga", "dior", "moncler", "burberry"
+    "stone island",
+    "tommy hilfiger",
+    "lacoste",
+    "jack and jones",
+    "stussy",
+    "levis",
+    "bershka",
+    "h&m",
+    "zara",
+    "the north face"
 ]
 
 # ⚠️ INDICATEURS DE CONTREFAÇON
@@ -27,13 +34,11 @@ FAKE_KEYWORDS = ["copie", "réplique", "replica", "ua", "1:1", "imitation", "fau
 AUTH_KEYWORDS = ["facture", "ticket", "certificat", "authentique", "boite d'origine", "receipt", "boîte", "preuve d'achat"]
 
 def get_field(item, field_name, default=None):
-    """Lit une propriété que l'objet soit un dictionnaire ou un objet Python."""
     if isinstance(item, dict):
         return item.get(field_name, default)
     return getattr(item, field_name, default)
 
 def extract_price(item):
-    """Extrait proprement le prix, peu importe le format renvoyé par Vinted."""
     price_raw = get_field(item, 'price')
     if isinstance(price_raw, dict):
         return price_raw.get('amount') or price_raw.get('numeric') or "N/C"
@@ -42,7 +47,6 @@ def extract_price(item):
     return "N/C"
 
 def extract_photo_url(item):
-    """Extrait l'URL de l'image principale de manière sécurisée."""
     photo = get_field(item, 'photo') or get_field(item, 'photos')
     if not photo:
         return None
@@ -72,20 +76,19 @@ def analyze_authenticity(description, title):
     
     for fake_word in FAKE_KEYWORDS:
         if fake_word in full_text:
-            return "❌ RISQUE ÉLEVÉ", f"Mot-clé suspect trouvé : '{fake_word}'", 15158332  # Rouge
+            return "❌ RISQUE ÉLEVÉ", f"Mot-clé suspect trouvé : '{fake_word}'", 15158332
 
     has_proof = any(auth_word in full_text for auth_word in AUTH_KEYWORDS)
     if has_proof:
-        return "✅ PREUVE D'AUTHENTICITÉ", "Facture / Certificat / Preuve d'achat mentionné.", 3066993  # Vert
+        return "✅ PREUVE D'AUTHENTICITÉ", "Facture / Certificat / Preuve d'achat mentionné.", 3066993
 
-    return "⚠️ À VÉRIFIER", "Aucun document d'authenticité mentionné dans le texte.", 16776960  # Jaune
+    return "⚠️ À VÉRIFIER", "Aucun document d'authenticité mentionné dans le texte.", 16776960
 
 def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_status_desc, color, description):
     if not WEBHOOK_URL:
-        logging.error("❌ Erreur : WEBHOOK_URL est introuvable. Vérifiez vos variables d'environnement.")
+        logging.error("❌ Erreur : WEBHOOK_URL introuvable.")
         return
 
-    # S'assurer que l'URL commence par http
     article_url = link if (link and str(link).startswith("http")) else "https://www.vinted.fr"
 
     payload = {
@@ -111,7 +114,7 @@ def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_s
                     "inline": True
                 }
             ],
-            "footer": {"text": "Bot Vinted • Alerte Pépites & Luxe"}
+            "footer": {"text": "Bot Vinted • Alerte Pépites"}
         }]
     }
 
@@ -121,7 +124,7 @@ def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_s
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         if r.status_code in [200, 204]:
-            logging.info(f"✅ Message envoyé sur Discord pour : {title}")
+            logging.info(f"✅ Notification envoyée pour : {title}")
         else:
             logging.error(f"❌ Échec envoi Discord (Code HTTP {r.status_code}) : {r.text}")
     except Exception as e:
@@ -129,13 +132,13 @@ def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_s
 
 def main():
     if not WEBHOOK_URL:
-        logging.critical("❌ ARRÊT : La variable d'environnement du Webhook est vide ! Assurez-vous d'avoir configuré le secret dans GitHub.")
+        logging.critical("❌ ARRÊT : Secret DISCORD_WEBHOOK_URL manquant.")
         return
 
     try:
         from vinted_scraper import VintedScraper
     except ImportError:
-        logging.critical("❌ La bibliothèque 'vinted_scraper' n'est pas installée. Exécutez 'pip install vinted-scraper'.")
+        logging.critical("❌ 'vinted-scraper' non installé.")
         return
 
     logging.info("Connexion à Vinted...")
@@ -151,7 +154,7 @@ def main():
             items = scraper.search({"search_text": brand, "order": "newest_first"})
             
             if not items:
-                logging.warning(f"Aucun article trouvé pour '{brand}' (ou blocage Vinted).")
+                logging.warning(f"Aucun article trouvé pour '{brand}'.")
                 continue
 
             count = 0
@@ -164,18 +167,16 @@ def main():
 
                 auth_title, auth_desc, color = analyze_authenticity(description, title)
 
-                # Ne pas notifier si le risque est trop élevé
                 if "RISQUE ÉLEVÉ" not in auth_title:
                     send_discord(title, price, brand, link, photo_url, auth_title, auth_desc, color, description)
                     count += 1
                     if count >= 2:
                         break
 
-            # Pause de 2 secondes entre chaque marque pour éviter d'être bloqué par Vinted
             time.sleep(2)
 
         except Exception as e:
-            logging.error(f"Erreur lors du traitement de la marque {brand} : {e}")
+            logging.error(f"Erreur pour la marque {brand} : {e}")
 
 if __name__ == "__main__":
     main()
