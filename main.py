@@ -8,7 +8,7 @@ import logging
 # Configuration des logs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# 📌 WEBHOOK DISCORD UNIQUE
+# 📌 WEBHOOK DISCORD
 WEBHOOK_URL = (
     os.environ.get("DISCORD_WEBHOOK_URL") 
     or os.environ.get("WEBHOOK_URL") 
@@ -18,22 +18,22 @@ WEBHOOK_URL = (
 # 🌐 API SITE PROFIT (Base44)
 BASE44_API_URL = "https://tangible-vinted-profit-pulse.base44.app/api/analyze"
 
-# 💾 FICHIER DES ARTICLES DÉJÀ ENVOYÉS (ANTI-DOUBLONS)
+# 💾 ANTI-DOUBLONS
 SEEN_FILE = "seen_items.json"
 
-# 🎯 MARQUES À SURVEILLER
-BRANDS = [
-    "stone island",
-    "tommy hilfiger",
-    "lacoste",
-    "jack and jones",
-    "stussy",
-    "levis",
-    "bershka",
-    "h&m",
-    "zara",
-    "the north face"
-]
+# 🎯 MARQUES & MULTIPLICATEURS DE REVENTE ESTIMÉE (Cote du marché)
+BRAND_MULTIPLIERS = {
+    "stone island": 1.65,
+    "stussy": 1.55,
+    "the north face": 1.50,
+    "lacoste": 1.40,
+    "tommy hilfiger": 1.35,
+    "levis": 1.30,
+    "jack and jones": 1.25,
+    "zara": 1.20,
+    "bershka": 1.15,
+    "h&m": 1.15
+}
 
 # ⚠️ INDICATEURS DE CONTREFAÇON
 FAKE_KEYWORDS = ["copie", "réplique", "replica", "ua", "1:1", "imitation", "fausse", "faux", "master quality"]
@@ -42,23 +42,21 @@ FAKE_KEYWORDS = ["copie", "réplique", "replica", "ua", "1:1", "imitation", "fau
 AUTH_KEYWORDS = ["facture", "ticket", "certificat", "authentique", "boite d'origine", "receipt", "boîte", "preuve d'achat"]
 
 def load_seen_items():
-    """Charge la liste des ID déjà notifiés."""
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, "r", encoding="utf-8") as f:
                 return set(json.load(f))
-        except Exception as e:
-            logging.warning(f"Impossible de lire {SEEN_FILE} : {e}")
+        except Exception:
+            pass
     return set()
 
 def save_seen_items(seen_set):
-    """Sauvegarde la liste des ID déjà notifiés (garde les 1000 derniers)."""
     try:
         items_list = list(seen_set)[-1000:]
         with open(SEEN_FILE, "w", encoding="utf-8") as f:
             json.dump(items_list, f)
     except Exception as e:
-        logging.error(f"Erreur lors de la sauvegarde de {SEEN_FILE} : {e}")
+        logging.error(f"Erreur sauvegarde {SEEN_FILE} : {e}")
 
 def get_field(item, field_name, default=None):
     if isinstance(item, dict):
@@ -66,17 +64,14 @@ def get_field(item, field_name, default=None):
     return getattr(item, field_name, default)
 
 def extract_item_url(item):
-    """Garantit un lien direct et valide vers l'objet Vinted."""
     url = get_field(item, 'url') or get_field(item, 'path')
     if not url:
         return "https://www.vinted.fr"
-    
     url_str = str(url).strip()
     if url_str.startswith("http://") or url_str.startswith("https://"):
         return url_str
     if url_str.startswith("/"):
         return f"https://www.vinted.fr{url_str}"
-    
     return f"https://www.vinted.fr/{url_str}"
 
 def extract_price(item):
@@ -88,7 +83,6 @@ def extract_price(item):
     return "N/C"
 
 def parse_float_price(price_str):
-    """Convertit une chaîne de prix en float de manière sécurisée."""
     if not price_str or price_str == "N/C":
         return 0.0
     try:
@@ -101,13 +95,10 @@ def extract_photo_url(item):
     photo = get_field(item, 'photo') or get_field(item, 'photos')
     if not photo:
         return None
-    
     if isinstance(photo, str) and photo.startswith("http"):
         return photo
-    
     if isinstance(photo, dict):
         return photo.get('url') or photo.get('full_size_url')
-    
     if isinstance(photo, list) and len(photo) > 0:
         first = photo[0]
         if isinstance(first, str) and first.startswith("http"):
@@ -116,15 +107,12 @@ def extract_photo_url(item):
             return first.get('url') or first.get('full_size_url')
         if hasattr(first, 'url'):
             return getattr(first, 'url')
-            
     if hasattr(photo, 'url'):
         return getattr(photo, 'url')
-        
     return None
 
 def analyze_authenticity(description, title):
     full_text = f"{title or ''} {description or ''}".lower()
-    
     for fake_word in FAKE_KEYWORDS:
         if fake_word in full_text:
             return "❌ RISQUE ÉLEVÉ", f"Mot-clé suspect : '{fake_word}'", 15158332
@@ -135,34 +123,73 @@ def analyze_authenticity(description, title):
 
     return "⚠️ À VÉRIFIER", "Aucun document d'authenticité mentionné.", 16776960
 
-def get_profit_from_base44(title, brand, price_raw, item_url):
-    """Envoie les données au site base44 pour récupérer l'estimation de profit."""
+def calculate_local_profit(brand, buy_price):
+    """Calculateur intelligent en cas d'absence de réponse du site web."""
+    if buy_price <= 0:
+        return {"estimated_resale": "N/C", "profit": "N/C", "score": "N/A"}
+
+    brand_lower = brand.lower()
+    multiplier = BRAND_MULTIPLIERS.get(brand_lower, 1.30)
+    
+    # Estimation prix de revente
+    estimated_resale = round(buy_price * multiplier, 2)
+    
+    # Estimation des frais Vinted / port (~8%)
+    estimated_fees = round(estimated_resale * 0.08, 2)
+    
+    # Profit net
+    net_profit = round(estimated_resale - buy_price - estimated_fees, 2)
+
+    # Calcul du score de marge / rentabilité sur 10
+    if net_profit >= 25:
+        score = "🔥 9.5/10 (Excellente)"
+    elif net_profit >= 15:
+        score = "⚡ 8.0/10 (Très Bonne)"
+    elif net_profit >= 8:
+        score = "✅ 6.5/10 (Correcte)"
+    elif net_profit > 0:
+        score = "⚠️ 4.0/10 (Faible)"
+    else:
+        score = "❌ 2.0/10 (Non Rentable)"
+
+    return {
+        "estimated_resale": f"{estimated_resale:.2f}",
+        "profit": f"{net_profit:.2f}",
+        "score": score
+    }
+
+def get_profit_data(title, brand, price_raw, item_url):
+    """Tente de contacter l'API du site, sinon bascule automatiquement sur le calcul local."""
+    numeric_price = parse_float_price(price_raw)
+
     try:
-        numeric_price = parse_float_price(price_raw)
         payload = {
             "title": title,
             "brand": brand,
             "price": numeric_price,
             "url": item_url
         }
-        r = requests.post(BASE44_API_URL, json=payload, timeout=8)
+        r = requests.post(BASE44_API_URL, json=payload, timeout=5)
+        
         if r.status_code == 200 and isinstance(r.json(), dict):
-            return r.json()
+            data = r.json()
+            # Vérifie si les clés attendues sont présentes
+            if "estimated_resale" in data or "profit" in data:
+                return data
     except Exception as e:
-        logging.warning(f"⚠️ Erreur lors de l'appel au site base44 : {e}")
-    
-    return None
+        logging.warning(f"⚠️ Erreur ou API site indisponible ({e}). Utilisation du calcul local.")
+
+    # 🔄 Secours automatique : calcul local instantané
+    return calculate_local_profit(brand, numeric_price)
 
 def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_title, auth_desc, color, description, profit_data):
-    """Envoie une notification unique combinée sur Discord."""
     if not WEBHOOK_URL:
         logging.error("❌ WEBHOOK_URL introuvable.")
         return
 
-    # Données issues de l'analyse du site base44
-    resale_price = profit_data.get("estimated_resale", "N/C") if isinstance(profit_data, dict) else "N/C"
-    net_profit = profit_data.get("profit", "N/C") if isinstance(profit_data, dict) else "N/C"
-    score = profit_data.get("score", "N/A") if isinstance(profit_data, dict) else "N/A"
+    resale_price = profit_data.get("estimated_resale", "N/C")
+    net_profit = profit_data.get("profit", "N/C")
+    score = profit_data.get("score", "N/A")
 
     payload = {
         "embeds": [{
@@ -207,7 +234,7 @@ def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_t
                     "inline": False
                 }
             ],
-            "footer": {"text": "Bot Vinted • Alerte & Profit Pulse Base44"}
+            "footer": {"text": "Bot Vinted • Profit Pulse Auto"}
         }]
     }
 
@@ -217,7 +244,7 @@ def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_t
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         if r.status_code in [200, 204]:
-            logging.info(f"✅ Alerte unique envoyée pour : {title}")
+            logging.info(f"✅ Alerte envoyée : {title} | Profit est. : +{net_profit}€")
         else:
             logging.error(f"❌ Erreur envoi Discord (HTTP {r.status_code}) : {r.text}")
     except Exception as e:
@@ -243,7 +270,9 @@ def main():
         logging.error(f"❌ Erreur d'initialisation VintedScraper : {e}")
         return
 
-    for brand in BRANDS:
+    brands = list(BRAND_MULTIPLIERS.keys())
+
+    for brand in brands:
         try:
             logging.info(f"Recherche : {brand}")
             items = scraper.search({"search_text": brand, "order": "newest_first"})
@@ -255,7 +284,6 @@ def main():
             for item in items[:5]:
                 item_id = str(get_field(item, 'id') or extract_item_url(item))
 
-                # Sauter si l'article a déjà été notifié
                 if item_id in seen_items:
                     continue
 
@@ -268,16 +296,15 @@ def main():
                 auth_title, auth_desc, color = analyze_authenticity(description, title)
 
                 if "RISQUE ÉLEVÉ" not in auth_title:
-                    # 1. Calcul du profit via le site Base44
-                    profit_data = get_profit_from_base44(title, brand, price, item_url)
+                    # 1. Calcul du profit (API Site ou Moteur de secours)
+                    profit_data = get_profit_data(title, brand, price, item_url)
 
-                    # 2. Envoi du message unique combiné
+                    # 2. Envoi de l'alerte
                     send_combined_discord_alert(
                         title, price, brand, item_url, photo_url, 
                         auth_title, auth_desc, color, description, profit_data
                     )
 
-                    # Marquer l'article comme vu
                     seen_items.add(item_id)
                     count += 1
                     if count >= 2:
@@ -288,7 +315,6 @@ def main():
         except Exception as e:
             logging.error(f"Erreur pour {brand} : {e}")
 
-    # Sauvegarder la mémoire anti-doublons à la fin de l'exécution
     save_seen_items(seen_items)
 
 if __name__ == "__main__":
