@@ -173,14 +173,28 @@ def get_profit_data(title, brand, price_raw, item_url):
         
         if r.status_code == 200 and isinstance(r.json(), dict):
             data = r.json()
-            # Vérifie si les clés attendues sont présentes
             if "estimated_resale" in data or "profit" in data:
                 return data
     except Exception as e:
         logging.warning(f"⚠️ Erreur ou API site indisponible ({e}). Utilisation du calcul local.")
 
-    # 🔄 Secours automatique : calcul local instantané
     return calculate_local_profit(brand, numeric_price)
+
+def extract_numeric_score(profit_data):
+    """Extrait une valeur numérique de la note ou du profit pour effectuer le tri."""
+    if not profit_data or not isinstance(profit_data, dict):
+        return -999.0
+
+    score_str = str(profit_data.get("score", ""))
+    match = re.search(r"(\d+(?:\.\d+)?)", score_str)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+
+    # Si pas de note explicite, on utilise la valeur du profit net
+    return parse_float_price(profit_data.get("profit", 0))
 
 def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_title, auth_desc, color, description, profit_data):
     if not WEBHOOK_URL:
@@ -244,7 +258,7 @@ def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_t
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         if r.status_code in [200, 204]:
-            logging.info(f"✅ Alerte envoyée : {title} | Profit est. : +{net_profit}€")
+            logging.info(f"✅ Alerte envoyée : {title} | Score : {score}")
         else:
             logging.error(f"❌ Erreur envoi Discord (HTTP {r.status_code}) : {r.text}")
     except Exception as e:
@@ -271,7 +285,9 @@ def main():
         return
 
     brands = list(BRAND_MULTIPLIERS.keys())
+    all_analyzed_items = []
 
+    # 1. Collecte et analyse de tous les articles
     for brand in brands:
         try:
             logging.info(f"Recherche : {brand}")
@@ -280,7 +296,6 @@ def main():
             if not items:
                 continue
 
-            count = 0
             for item in items[:5]:
                 item_id = str(get_field(item, 'id') or extract_item_url(item))
 
@@ -296,24 +311,43 @@ def main():
                 auth_title, auth_desc, color = analyze_authenticity(description, title)
 
                 if "RISQUE ÉLEVÉ" not in auth_title:
-                    # 1. Calcul du profit (API Site ou Moteur de secours)
                     profit_data = get_profit_data(title, brand, price, item_url)
+                    numeric_score = extract_numeric_score(profit_data)
 
-                    # 2. Envoi de l'alerte
-                    send_combined_discord_alert(
-                        title, price, brand, item_url, photo_url, 
-                        auth_title, auth_desc, color, description, profit_data
-                    )
+                    all_analyzed_items.append({
+                        "item_id": item_id,
+                        "title": title,
+                        "price": price,
+                        "brand": brand,
+                        "item_url": item_url,
+                        "photo_url": photo_url,
+                        "auth_title": auth_title,
+                        "auth_desc": auth_desc,
+                        "color": color,
+                        "description": description,
+                        "profit_data": profit_data,
+                        "numeric_score": numeric_score
+                    })
 
-                    seen_items.add(item_id)
-                    count += 1
-                    if count >= 2:
-                        break
-
-            time.sleep(2)
+            time.sleep(1)
 
         except Exception as e:
             logging.error(f"Erreur pour {brand} : {e}")
+
+    # 2. 🎯 TRI : Les meilleures notes en premier, les pires à la fin
+    all_analyzed_items.sort(key=lambda x: x["numeric_score"], reverse=True)
+
+    logging.info(f"📊 {len(all_analyzed_items)} articles triés par note. Début des envois Discord...")
+
+    # 3. Envoi des alertes triées sur Discord
+    for item in all_analyzed_items:
+        send_combined_discord_alert(
+            item["title"], item["price"], item["brand"], item["item_url"],
+            item["photo_url"], item["auth_title"], item["auth_desc"],
+            item["color"], item["description"], item["profit_data"]
+        )
+        seen_items.add(item["item_id"])
+        time.sleep(1)  # Anti-spam Discord
 
     save_seen_items(seen_items)
 
