@@ -334,10 +334,10 @@ def main():
         except Exception as e:
             logging.error(f"Erreur pour {brand} : {e}")
 
-    # 2. 🎯 TRI : Les meilleures notes en premier, les pires à la fin
-    all_analyzed_items.sort(key=lambda x: x["numeric_score"], reverse=True)
+    # 2. 🎯 TRI : Pires scores en premier, meilleurs scores en dernier (ordre croissant)
+    all_analyzed_items.sort(key=lambda x: x["numeric_score"], reverse=False)
 
-    logging.info(f"📊 {len(all_analyzed_items)} articles triés par note. Début des envois Discord...")
+    logging.info(f"📊 {len(all_analyzed_items)} articles triés (pires en premier, meilleurs en dernier). Début des envois Discord...")
 
     # 3. Envoi des alertes triées sur Discord
     for item in all_analyzed_items:
