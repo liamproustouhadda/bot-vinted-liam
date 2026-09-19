@@ -3,17 +3,17 @@ import time
 import requests
 import logging
 
-# Configuration des logs pour voir l'exécution dans GitHub Actions
+# Configuration des logs
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Récupération de l'URL du Webhook
+# Récupération du Webhook Discord
 WEBHOOK_URL = (
     os.environ.get("DISCORD_WEBHOOK_URL") 
     or os.environ.get("WEBHOOK_URL") 
     or os.environ.get("DISCORD_BOT_TOKEN")
 )
 
-# 🎯 NOUVELLE LISTE DE MARQUES À SURVEILLER
+# 🎯 VOTRE LISTE DE MARQUES
 BRANDS = [
     "stone island",
     "tommy hilfiger",
@@ -37,6 +37,20 @@ def get_field(item, field_name, default=None):
     if isinstance(item, dict):
         return item.get(field_name, default)
     return getattr(item, field_name, default)
+
+def extract_item_url(item):
+    """Garantit l'obtention du lien complet et précis vers la fiche de l'objet."""
+    url = get_field(item, 'url') or get_field(item, 'path')
+    if not url:
+        return "https://www.vinted.fr"
+    
+    url_str = str(url).strip()
+    if url_str.startswith("http://") or url_str.startswith("https://"):
+        return url_str
+    if url_str.startswith("/"):
+        return f"https://www.vinted.fr{url_str}"
+    
+    return f"https://www.vinted.fr/{url_str}"
 
 def extract_price(item):
     price_raw = get_field(item, 'price')
@@ -84,17 +98,15 @@ def analyze_authenticity(description, title):
 
     return "⚠️ À VÉRIFIER", "Aucun document d'authenticité mentionné dans le texte.", 16776960
 
-def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_status_desc, color, description):
+def send_discord(title, price, brand, item_url, photo_url, auth_status_title, auth_status_desc, color, description):
     if not WEBHOOK_URL:
-        logging.error("❌ Erreur : WEBHOOK_URL introuvable.")
+        logging.error("❌ Erreur : WEBHOOK_URL introuvable dans les variables d'environnement.")
         return
-
-    article_url = link if (link and str(link).startswith("http")) else "https://www.vinted.fr"
 
     payload = {
         "embeds": [{
             "title": f"🛍️ [{brand.upper()}] {title or 'Article Vinted'}",
-            "url": article_url,
+            "url": item_url,  # Lien précis en cliquant sur le titre
             "description": (description[:250] + "...") if description and len(description) > 250 else (description or "Pas de description disponible"),
             "color": color,
             "fields": [
@@ -112,6 +124,11 @@ def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_s
                     "name": "🏷️ Marque",
                     "value": brand.capitalize(),
                     "inline": True
+                },
+                {
+                    "name": "🔗 Lien Direct",
+                    "value": f"[👉 Cliquer ici pour voir/acheter l'objet]({item_url})",
+                    "inline": False
                 }
             ],
             "footer": {"text": "Bot Vinted • Alerte Pépites"}
@@ -132,7 +149,7 @@ def send_discord(title, price, brand, link, photo_url, auth_status_title, auth_s
 
 def main():
     if not WEBHOOK_URL:
-        logging.critical("❌ ARRÊT : Secret DISCORD_WEBHOOK_URL manquant.")
+        logging.critical("❌ ARRÊT : Variable DISCORD_WEBHOOK_URL introuvable.")
         return
 
     try:
@@ -161,14 +178,14 @@ def main():
             for item in items[:5]:
                 title = get_field(item, 'title', '')
                 price = extract_price(item)
-                link = get_field(item, 'url', '')
+                item_url = extract_item_url(item)  # Lien exact et vérifié
                 description = get_field(item, 'description', '')
                 photo_url = extract_photo_url(item)
 
                 auth_title, auth_desc, color = analyze_authenticity(description, title)
 
                 if "RISQUE ÉLEVÉ" not in auth_title:
-                    send_discord(title, price, brand, link, photo_url, auth_title, auth_desc, color, description)
+                    send_discord(title, price, brand, item_url, photo_url, auth_title, auth_desc, color, description)
                     count += 1
                     if count >= 2:
                         break
