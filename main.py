@@ -12,17 +12,11 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# 📌 WEBHOOK 1 : Salon Général (Tous les articles)
+# 📌 WEBHOOK DISCORD (Un seul salon pour tout recevoir)
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
 
-# 🔥 WEBHOOK 2 : Salon Pépites / Meilleures affaires
-BEST_WEBHOOK_URL = os.environ.get("DISCORD_BEST_WEBHOOK_URL") or os.environ.get("BEST_WEBHOOK_URL")
-
-# Seuil de note minimale pour le salon pépites (modifiable via variable d'environnement HIGH_SCORE_THRESHOLD)
-try:
-    HIGH_SCORE_THRESHOLD = float(os.environ.get("HIGH_SCORE_THRESHOLD", "6.0"))
-except ValueError:
-    HIGH_SCORE_THRESHOLD = 6.0
+# 🔔 Note minimale pour déclencher la mention @everyone
+PING_THRESHOLD = 6.5
 
 # API d'estimation de rentabilité
 BASE44_API_URL = "https://tangible-vinted-profit-pulse.base44.app/api/analyze"
@@ -208,9 +202,9 @@ def extract_numeric_score(profit_data):
 # ---------------------------------------------------------------------------
 # ENVOI DISCORD
 # ---------------------------------------------------------------------------
-def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_title, auth_desc, color, description, profit_data, target_webhook, channel_name="Général"):
-    if not target_webhook:
-        return False
+def send_discord_alert(title, price, brand, item_url, photo_url, auth_title, auth_desc, color, description, profit_data, numeric_score):
+    if not WEBHOOK_URL:
+        return
 
     resale_price = profit_data.get("estimated_resale", "N/C")
     net_profit = profit_data.get("profit", "N/C")
@@ -232,79 +226,64 @@ def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_t
                     {"name": "⭐ Score Marge", "value": str(score), "inline": True},
                     {"name": "🔗 Lien Direct", "value": f"[👉 Voir/Acheter l'article sur Vinted]({item_url})", "inline": False},
                 ],
-                "footer": {"text": f"Bot Vinted • Salon : {channel_name}"},
+                "footer": {"text": "Bot Vinted • Profit Pulse Auto"},
             }
         ]
     }
+
+    # 🚨 PING EVERYONE si la note est >= 6.5/10
+    if numeric_score >= PING_THRESHOLD:
+        payload["content"] = f"@everyone 🚨 **GROSSE PÉPITE DÉTECTÉE !** (Note : {numeric_score}/10)"
 
     if photo_url and isinstance(photo_url, str) and photo_url.startswith("http"):
         payload["embeds"][0]["thumbnail"] = {"url": photo_url}
 
     try:
-        r = requests.post(target_webhook, json=payload, timeout=10)
+        r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         if r.status_code in [200, 204]:
-            logging.info(f"✅ [{channel_name}] Alerte envoyée : {title} (Note: {score})")
-            return True
+            ping_status = "avec @everyone 🚨" if numeric_score >= PING_THRESHOLD else "sans mention"
+            logging.info(f"✅ Alerte envoyée ({ping_status}) : {title} | Note: {score}")
         else:
-            logging.error(f"❌ [{channel_name}] Erreur HTTP {r.status_code} Discord : {r.text}")
-            return False
+            logging.error(f"❌ Refus Discord ({r.status_code}) : {r.text}")
     except Exception as e:
-        logging.error(f"❌ [{channel_name}] Erreur Réseau Webhook : {e}")
-        return False
+        logging.error(f"❌ Erreur Webhook : {e}")
 
 
 # ---------------------------------------------------------------------------
 # SCRIPT PRINCIPAL
 # ---------------------------------------------------------------------------
 def main():
-    logging.info("============================================")
-    logging.info("🤖 DÉMARRAGE DU BOT VINTED PROFIT PULSE")
-    logging.info("============================================")
-
-    # 1. Vérification des Webhooks au démarrage
     if not WEBHOOK_URL:
-        logging.critical("❌ ARRÊT : 'DISCORD_WEBHOOK_URL' manquant dans les variables d'environnement.")
+        logging.critical("❌ ARRÊT : 'DISCORD_WEBHOOK_URL' manquant.")
         return
-    else:
-        logging.info("✅ Salon Général configuré.")
-
-    if not BEST_WEBHOOK_URL:
-        logging.warning("⚠️ Webhook 'DISCORD_BEST_WEBHOOK_URL' NON DÉTECTÉ. Les pépites ne seront envoyées que dans le salon général.")
-    else:
-        logging.info("✅ Salon Pépites configuré.")
-
-    logging.info(f"🎯 Seuil minimal pour le salon Pépites : {HIGH_SCORE_THRESHOLD} / 10")
 
     try:
         from vinted_scraper import VintedScraper
     except ImportError:
-        logging.critical("❌ Bibliothèque 'vinted-scraper' non installée. Installez-la avec : pip install vinted-scraper")
+        logging.critical("❌ Installez vinted-scraper : pip install vinted-scraper")
         return
 
     seen_items = load_seen_items()
-    logging.info(f"💾 {len(seen_items)} articles déjà traités en mémoire.")
+    logging.info(f"💾 {len(seen_items)} articles en mémoire.")
 
     try:
         scraper = VintedScraper("https://www.vinted.fr")
     except Exception as e:
-        logging.error(f"❌ Erreur d'initialisation VintedScraper : {e}")
+        logging.error(f"❌ Erreur VintedScraper : {e}")
         return
 
     brands = list(BRAND_MULTIPLIERS.keys())
     all_analyzed_items = []
 
-    # 2. COLLECTE ET ANALYSE
+    # 1. RECUEIL
     for brand in brands:
         try:
-            logging.info(f"🔎 Recherche d'articles : {brand}")
             items = scraper.search({"search_text": brand, "order": "newest_first"})
-
             if not items:
                 continue
 
             for item in items[:5]:
                 item_id = str(get_field(item, "id") or extract_item_url(item))
-
                 if item_id in seen_items:
                     continue
 
@@ -341,43 +320,24 @@ def main():
             time.sleep(1)
 
         except Exception as e:
-            logging.error(f"❌ Erreur lors de la recherche ({brand}) : {e}")
+            logging.error(f"❌ Erreur {brand} : {e}")
 
-    # 3. TRI : Meilleures notes en PREMIER
+    # 2. TRI DÉCROISSANT (Meilleures notes envoyées en premier)
     all_analyzed_items.sort(key=lambda x: x["numeric_score"], reverse=True)
-    logging.info(f"📊 {len(all_analyzed_items)} nouveaux articles triés par note décroissante.")
 
-    # 4. ENVOI DES NOTIFICATIONS
+    # 3. ENVOI DES MESSAGES
     for item in all_analyzed_items:
-        score_val = item["numeric_score"]
-        title_summary = f"{item['brand'].upper()} - {item['title']} ({item['price']}€)"
-
-        # A. Envoi systématique dans le Salon Général
-        send_combined_discord_alert(
+        send_discord_alert(
             item["title"], item["price"], item["brand"], item["item_url"],
             item["photo_url"], item["auth_title"], item["auth_desc"], item["color"],
-            item["description"], item["profit_data"], target_webhook=WEBHOOK_URL,
-            channel_name="Général"
+            item["description"], item["profit_data"], item["numeric_score"]
         )
 
-        # B. Évaluation et Envoi dans le Salon Pépites
-        if BEST_WEBHOOK_URL:
-            if score_val >= HIGH_SCORE_THRESHOLD:
-                logging.info(f"🔥 [PÉPITE] Note {score_val}/10 >= {HIGH_SCORE_THRESHOLD} -> Envoi dans Salon Pépites ({title_summary})")
-                send_combined_discord_alert(
-                    item["title"], item["price"], item["brand"], item["item_url"],
-                    item["photo_url"], item["auth_title"], item["auth_desc"], item["color"],
-                    item["description"], item["profit_data"], target_webhook=BEST_WEBHOOK_URL,
-                    channel_name="Pépites"
-                )
-            else:
-                logging.info(f"ℹ️ [FILTRÉ] Note {score_val}/10 < {HIGH_SCORE_THRESHOLD} -> Non envoyé dans Salon Pépites")
-
         seen_items.add(item["item_id"])
-        time.sleep(1.2)  # Pause anti-spam Discord
+        time.sleep(1.2)
 
     save_seen_items(seen_items)
-    logging.info("🏁 Exécution terminée avec succès.")
+    logging.info("🏁 Exécution terminée.")
 
 
 if __name__ == "__main__":
