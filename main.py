@@ -5,31 +5,29 @@ import re
 import time
 import requests
 
-# Configuration des logs
+# ---------------------------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# 📌 WEBHOOK DISCORD 1 : Salon principal (Tous les articles)
-WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get(
-    "WEBHOOK_URL"
-)
+# 📌 WEBHOOK 1 : Salon Général (Tous les articles)
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
 
-# 🔥 WEBHOOK DISCORD 2 : Salon "Pépites / Meilleures affaires"
-BEST_WEBHOOK_URL = os.environ.get("DISCORD_BEST_WEBHOOK_URL") or os.environ.get(
-    "BEST_WEBHOOK_URL"
-)
+# 🔥 WEBHOOK 2 : Salon Pépites / Meilleures affaires (Score >= 7.0)
+BEST_WEBHOOK_URL = os.environ.get("DISCORD_BEST_WEBHOOK_URL") or os.environ.get("BEST_WEBHOOK_URL")
 
-# 🎯 SEUIL POUR LE SALON DES PÉPITES : Toutes les notes >= 7.0/10
+# Seuil de note pour le salon pépites
 HIGH_SCORE_THRESHOLD = 7.0
 
-# 🌐 API SITE PROFIT (Base44)
+# API d'estimation de rentabilité
 BASE44_API_URL = "https://tangible-vinted-profit-pulse.base44.app/api/analyze"
 
-# 💾 ANTI-DOUBLONS
+# Mémoire anti-doublons
 SEEN_FILE = "seen_items.json"
 
-# 🎯 MARQUES & MULTIPLICATEURS DE REVENTE ESTIMÉE (Cote du marché)
+# Cote estimée par marque (Multiplicateur de revente)
 BRAND_MULTIPLIERS = {
     "stone island": 1.65,
     "stussy": 1.55,
@@ -43,32 +41,13 @@ BRAND_MULTIPLIERS = {
     "h&m": 1.15,
 }
 
-# ⚠️ INDICATEURS DE CONTREFAÇON
-FAKE_KEYWORDS = [
-    "copie",
-    "réplique",
-    "replica",
-    "ua",
-    "1:1",
-    "imitation",
-    "fausse",
-    "faux",
-    "master quality",
-]
-
-# ✅ INDICATEURS D'AUTHENTICITÉ
-AUTH_KEYWORDS = [
-    "facture",
-    "ticket",
-    "certificat",
-    "authentique",
-    "boite d'origine",
-    "receipt",
-    "boîte",
-    "preuve d'achat",
-]
+FAKE_KEYWORDS = ["copie", "réplique", "replica", "ua", "1:1", "imitation", "fausse", "faux", "master quality"]
+AUTH_KEYWORDS = ["facture", "ticket", "certificat", "authentique", "boite d'origine", "receipt", "boîte", "preuve d'achat"]
 
 
+# ---------------------------------------------------------------------------
+# FONCTIONS DE GESTION DES DONNÉES ET PARSING
+# ---------------------------------------------------------------------------
 def load_seen_items():
     if os.path.exists(SEEN_FILE):
         try:
@@ -146,38 +125,27 @@ def extract_photo_url(item):
     return None
 
 
+# ---------------------------------------------------------------------------
+# ANALYSE & CALCULS
+# ---------------------------------------------------------------------------
 def analyze_authenticity(description, title):
     full_text = f"{title or ''} {description or ''}".lower()
     for fake_word in FAKE_KEYWORDS:
         if fake_word in full_text:
-            return (
-                "❌ RISQUE ÉLEVÉ",
-                f"Mot-clé suspect : '{fake_word}'",
-                15158332,
-            )
+            return ("❌ RISQUE ÉLEVÉ", f"Mot-clé suspect détecté : '{fake_word}'", 15158332)
 
     has_proof = any(auth_word in full_text for auth_word in AUTH_KEYWORDS)
     if has_proof:
-        return (
-            "✅ PREUVE D'AUTHENTICITÉ",
-            "Facture / Certificat / Preuve d'achat mentionné.",
-            3066993,
-        )
+        return ("✅ PREUVE D'AUTHENTICITÉ", "Facture / Certificat / Preuve d'achat mentionné.", 3066993)
 
-    return (
-        "⚠️ À VÉRIFIER",
-        "Aucun document d'authenticité mentionné.",
-        16776960,
-    )
+    return ("⚠️ À VÉRIFIER", "Aucun document d'authenticité mentionné.", 16776960)
 
 
 def calculate_local_profit(brand, buy_price):
     if buy_price <= 0:
         return {"estimated_resale": "N/C", "profit": "N/C", "score": "N/A"}
 
-    brand_lower = brand.lower()
-    multiplier = BRAND_MULTIPLIERS.get(brand_lower, 1.30)
-
+    multiplier = BRAND_MULTIPLIERS.get(brand.lower(), 1.30)
     estimated_resale = round(buy_price * multiplier, 2)
     estimated_fees = round(estimated_resale * 0.08, 2)
     net_profit = round(estimated_resale - buy_price - estimated_fees, 2)
@@ -202,24 +170,15 @@ def calculate_local_profit(brand, buy_price):
 
 def get_profit_data(title, brand, price_raw, item_url):
     numeric_price = parse_float_price(price_raw)
-
     try:
-        payload = {
-            "title": title,
-            "brand": brand,
-            "price": numeric_price,
-            "url": item_url,
-        }
+        payload = {"title": title, "brand": brand, "price": numeric_price, "url": item_url}
         r = requests.post(BASE44_API_URL, json=payload, timeout=5)
-
         if r.status_code == 200 and isinstance(r.json(), dict):
             data = r.json()
             if "estimated_resale" in data or "profit" in data:
                 return data
     except Exception as e:
-        logging.warning(
-            f"⚠️ Erreur ou API site indisponible ({e}). Utilisation du calcul local."
-        )
+        logging.warning(f"⚠️ API externe indisponible ({e}). Utilisation du calcul local.")
 
     return calculate_local_profit(brand, numeric_price)
 
@@ -243,20 +202,10 @@ def extract_numeric_score(profit_data):
     return parse_float_price(profit_data.get("profit", 0))
 
 
-def send_combined_discord_alert(
-    title,
-    price,
-    brand,
-    item_url,
-    photo_url,
-    auth_title,
-    auth_desc,
-    color,
-    description,
-    profit_data,
-    target_webhook,
-):
-    """Envoie l'alerte au webhook spécifié."""
+# ---------------------------------------------------------------------------
+# ENVOI DISCORD
+# ---------------------------------------------------------------------------
+def send_combined_discord_alert(title, price, brand, item_url, photo_url, auth_title, auth_desc, color, description, profit_data, target_webhook):
     if not target_webhook:
         return
 
@@ -269,107 +218,77 @@ def send_combined_discord_alert(
             {
                 "title": f"🛍️ [{brand.upper()}] {title or 'Article Vinted'}",
                 "url": item_url,
-                "description": (description[:200] + "...")
-                if description and len(description) > 200
-                else (description or "Pas de description disponible"),
+                "description": (description[:200] + "...") if description and len(description) > 200 else (description or "Pas de description disponible"),
                 "color": color,
                 "fields": [
-                    {
-                        "name": "🛡️ Authenticité",
-                        "value": f"**{auth_title}**\n{auth_desc}",
-                        "inline": False,
-                    },
-                    {
-                        "name": "💰 Prix Achat",
-                        "value": f"{price} €" if price != "N/C" else "N/C",
-                        "inline": True,
-                    },
-                    {
-                        "name": "📈 Revente Est.",
-                        "value": f"{resale_price} €"
-                        if str(resale_price) != "N/C"
-                        else "N/C",
-                        "inline": True,
-                    },
-                    {
-                        "name": "💵 Profit Net",
-                        "value": f"**+{net_profit} €**"
-                        if str(net_profit) != "N/C"
-                        else "N/C",
-                        "inline": True,
-                    },
-                    {
-                        "name": "🏷️ Marque",
-                        "value": brand.capitalize(),
-                        "inline": True,
-                    },
-                    {
-                        "name": "⭐ Score Marge",
-                        "value": str(score),
-                        "inline": True,
-                    },
-                    {
-                        "name": "🔗 Lien Direct",
-                        "value": f"[👉 Voir/Acheter l'article sur Vinted]({item_url})",
-                        "inline": False,
-                    },
+                    {"name": "🛡️ Authenticité", "value": f"**{auth_title}**\n{auth_desc}", "inline": False},
+                    {"name": "💰 Prix Achat", "value": f"{price} €" if price != "N/C" else "N/C", "inline": True},
+                    {"name": "📈 Revente Est.", "value": f"{resale_price} €" if str(resale_price) != "N/C" else "N/C", "inline": True},
+                    {"name": "💵 Profit Net", "value": f"**+{net_profit} €**" if str(net_profit) != "N/C" else "N/C", "inline": True},
+                    {"name": "🏷️ Marque", "value": brand.capitalize(), "inline": True},
+                    {"name": "⭐ Score Marge", "value": str(score), "inline": True},
+                    {"name": "🔗 Lien Direct", "value": f"[👉 Voir/Acheter l'article sur Vinted]({item_url})", "inline": False},
                 ],
                 "footer": {"text": "Bot Vinted • Profit Pulse Auto"},
             }
         ]
     }
 
-    if (
-        photo_url
-        and isinstance(photo_url, str)
-        and photo_url.startswith("http")
-    ):
+    if photo_url and isinstance(photo_url, str) and photo_url.startswith("http"):
         payload["embeds"][0]["thumbnail"] = {"url": photo_url}
 
     try:
         r = requests.post(target_webhook, json=payload, timeout=10)
         if r.status_code in [200, 204]:
-            logging.info(f"✅ Alerte envoyée : {title} | Score : {score}")
+            logging.info(f"✅ Alerte Discord envoyée : {title} | Note: {score}")
         else:
-            logging.error(
-                f"❌ Erreur envoi Discord (HTTP {r.status_code}) : {r.text}"
-            )
+            logging.error(f"❌ Refus Discord (Code HTTP {r.status_code}) : {r.text}")
     except Exception as e:
         logging.error(f"❌ Erreur réseau Webhook : {e}")
 
 
+# ---------------------------------------------------------------------------
+# SCRIPT PRINCIPAL
+# ---------------------------------------------------------------------------
 def main():
+    logging.info("--- CONTRÔLE DES WEBHOOKS ---")
     if not WEBHOOK_URL:
-        logging.critical("❌ ARRÊT : Secret DISCORD_WEBHOOK_URL manquant.")
+        logging.critical("❌ ARRÊT : Secret 'DISCORD_WEBHOOK_URL' manquant dans les variables d'environnement.")
         return
+    else:
+        logging.info("✅ Webhook Général configuré.")
+
+    if not BEST_WEBHOOK_URL:
+        logging.warning("⚠️ Webhook 'DISCORD_BEST_WEBHOOK_URL' non configuré. Les pépites seront uniquement sur le salon général.")
+    else:
+        logging.info("✅ Webhook Pépites configuré.")
 
     try:
         from vinted_scraper import VintedScraper
     except ImportError:
-        logging.critical("❌ 'vinted-scraper' non installé.")
+        logging.critical("❌ 'vinted-scraper' n'est pas installé. Exécutez : pip install vinted-scraper")
         return
 
     seen_items = load_seen_items()
+    logging.info(f"💾 {len(seen_items)} articles déjà vus en mémoire.")
 
-    logging.info("Connexion à Vinted...")
     try:
         scraper = VintedScraper("https://www.vinted.fr")
     except Exception as e:
-        logging.error(f"❌ Erreur d'initialisation VintedScraper : {e}")
+        logging.error(f"❌ Impossible d'initialiser VintedScraper : {e}")
         return
 
     brands = list(BRAND_MULTIPLIERS.keys())
     all_analyzed_items = []
 
-    # 1. Collecte et analyse de tous les articles
+    # 1. RECUEIL ET ANALYSE
     for brand in brands:
         try:
-            logging.info(f"Recherche : {brand}")
-            items = scraper.search(
-                {"search_text": brand, "order": "newest_first"}
-            )
+            logging.info(f"🔎 Recherche : {brand}")
+            items = scraper.search({"search_text": brand, "order": "newest_first"})
 
             if not items:
+                logging.warning(f"⚠️ Aucun résultat renvoyé pour {brand}.")
                 continue
 
             for item in items[:5]:
@@ -384,96 +303,64 @@ def main():
                 description = get_field(item, "description", "")
                 photo_url = extract_photo_url(item)
 
-                auth_title, auth_desc, color = analyze_authenticity(
-                    description, title
-                )
+                auth_title, auth_desc, color = analyze_authenticity(description, title)
 
-                # Si l'article présente un risque élevé de contrefaçon, on annule l'estimation de profit
+                # Si risque élevé de contrefaçon -> Note minimale
                 if "RISQUE ÉLEVÉ" in auth_title:
-                    profit_data = {
-                        "estimated_resale": "N/C",
-                        "profit": "N/C",
-                        "score": "❌ Risque Contrefaçon",
-                    }
+                    profit_data = {"estimated_resale": "N/C", "profit": "N/C", "score": "❌ Risque Contrefaçon"}
                     numeric_score = -1.0
                 else:
-                    profit_data = get_profit_data(
-                        title, brand, price, item_url
-                    )
+                    profit_data = get_profit_data(title, brand, price, item_url)
                     numeric_score = extract_numeric_score(profit_data)
 
-                all_analyzed_items.append(
-                    {
-                        "item_id": item_id,
-                        "title": title,
-                        "price": price,
-                        "brand": brand,
-                        "item_url": item_url,
-                        "photo_url": photo_url,
-                        "auth_title": auth_title,
-                        "auth_desc": auth_desc,
-                        "color": color,
-                        "description": description,
-                        "profit_data": profit_data,
-                        "numeric_score": numeric_score,
-                    }
-                )
+                all_analyzed_items.append({
+                    "item_id": item_id,
+                    "title": title,
+                    "price": price,
+                    "brand": brand,
+                    "item_url": item_url,
+                    "photo_url": photo_url,
+                    "auth_title": auth_title,
+                    "auth_desc": auth_desc,
+                    "color": color,
+                    "description": description,
+                    "profit_data": profit_data,
+                    "numeric_score": numeric_score,
+                })
 
             time.sleep(1)
 
         except Exception as e:
-            logging.error(f"Erreur pour {brand} : {e}")
+            logging.error(f"❌ Erreur sur la recherche de {brand} : {e}")
 
-    # 2. 🎯 TRI : Pires scores en premier, meilleurs en dernier
-    all_analyzed_items.sort(key=lambda x: x["numeric_score"], reverse=False)
+    # 2. 🎯 TRI DÉCROISSANT (Les notes les plus hautes / pépites en PREMIER)
+    all_analyzed_items.sort(key=lambda x: x["numeric_score"], reverse=True)
 
-    logging.info(
-        f"📊 {len(all_analyzed_items)} articles triés. Début du routage des alertes..."
-    )
+    logging.info(f"📊 TOTAL : {len(all_analyzed_items)} nouveaux articles triés du meilleur au moins bon.")
 
-    # 3. Routage vers les salons Discord
+    # 3. DISTRIBUTION DANS LES SALONS DISCORD
     for item in all_analyzed_items:
-        # Envoi systématique dans le salon principal
+        # A. Envoi dans le Salon Général (Chaque article trouvé)
         send_combined_discord_alert(
-            item["title"],
-            item["price"],
-            item["brand"],
-            item["item_url"],
-            item["photo_url"],
-            item["auth_title"],
-            item["auth_desc"],
-            item["color"],
-            item["description"],
-            item["profit_data"],
-            target_webhook=WEBHOOK_URL,
+            item["title"], item["price"], item["brand"], item["item_url"],
+            item["photo_url"], item["auth_title"], item["auth_desc"], item["color"],
+            item["description"], item["profit_data"], target_webhook=WEBHOOK_URL
         )
 
-        # 🔥 Si le score est >= 7.0/10 ET que le Webhook Pépites est configuré -> Envoi dans le salon "Pépites"
-        if (
-            BEST_WEBHOOK_URL
-            and item["numeric_score"] >= HIGH_SCORE_THRESHOLD
-        ):
-            logging.info(
-                f"🔥 Pépite détectée ({item['numeric_score']}/10) ! Envoi dans le salon spécial."
-            )
+        # B. Envoi dans le Salon Pépites (Si note >= 7.0/10 ET deuxième webhook présent)
+        if BEST_WEBHOOK_URL and item["numeric_score"] >= HIGH_SCORE_THRESHOLD:
+            logging.info(f"🔥 [PÉPITE REÇUE] Score {item['numeric_score']}/10 -> Redirection vers le salon Pépites.")
             send_combined_discord_alert(
-                item["title"],
-                item["price"],
-                item["brand"],
-                item["item_url"],
-                item["photo_url"],
-                item["auth_title"],
-                item["auth_desc"],
-                item["color"],
-                item["description"],
-                item["profit_data"],
-                target_webhook=BEST_WEBHOOK_URL,
+                item["title"], item["price"], item["brand"], item["item_url"],
+                item["photo_url"], item["auth_title"], item["auth_desc"], item["color"],
+                item["description"], item["profit_data"], target_webhook=BEST_WEBHOOK_URL
             )
 
         seen_items.add(item["item_id"])
-        time.sleep(1)  # Anti-spam Discord
+        time.sleep(1.2)  # Temporalisation anti-spam API Discord
 
     save_seen_items(seen_items)
+    logging.info("🏁 Exécution terminée.")
 
 
 if __name__ == "__main__":
